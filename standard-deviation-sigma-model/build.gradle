@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-ext.javaExerciseClassName = 'org.streammodels.sdsigmamodel.RideCleansingExercise.java'
+ext.javaExerciseClassName = 'org.streammodels.models.sdsigmamodel.SdSigmaModel.java'
 
 apply plugin: 'application'
 
