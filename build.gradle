@@ -130,6 +130,11 @@ subprojects {
 
         // allows using Flink's web UI when running in the IDE:
         shadow "org.apache.flink:flink-runtime-web:${flinkVersion}"
+
+        // https://mvnrepository.com/artifact/com.google.guava/guava
+        implementation group: 'com.google.guava', name: 'guava', version: '31.1-jre'
+
+        implementation 'org.apache.commons:commons-math3:3.6.1'
     }
 
     // add solution source dirs:

@@ -68,6 +68,11 @@ public abstract class RandomCatastropheMetricGenerator<T> implements DataGenerat
 
             @Override
             public Integer next() {
+                try {
+                    Thread.sleep(Double.valueOf(0.1 * 1000).longValue());
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
                 Integer nextInteger = random.nextInt(min, max);
                 if (this.isCatastrophe) {
                     nextInteger = nextInteger * 10;
