@@ -18,29 +18,24 @@
 
 package org.streammodels.models.sdsigmamodel;
 
+import org.apache.commons.math3.stat.descriptive.moment.Mean;
 import org.apache.commons.math3.stat.descriptive.moment.StandardDeviation;
 import org.apache.commons.math3.util.Precision;
 import org.apache.flink.api.common.JobExecutionResult;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
-import org.apache.flink.api.common.functions.FilterFunction;
 import org.apache.flink.api.common.state.*;
+import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
-import org.apache.flink.api.java.sampling.BernoulliSampler;
-import org.apache.flink.api.java.sampling.RandomSampler;
-import org.apache.flink.api.java.tuple.Tuple;
-import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.shaded.guava30.com.google.common.collect.Collections2;
+import org.apache.flink.api.java.tuple.Tuple1;
+import org.apache.flink.api.java.tuple.Tuple4;
 import org.apache.flink.shaded.guava30.com.google.common.collect.Iterables;
 import org.apache.flink.shaded.guava30.com.google.common.collect.Lists;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.co.CoProcessFunction;
 import org.apache.flink.streaming.api.functions.sink.PrintSinkFunction;
 import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.functions.source.datagen.DataGeneratorSource;
-import org.apache.flink.streaming.api.functions.source.datagen.RandomGenerator;
 import org.apache.flink.streaming.api.functions.windowing.ProcessAllWindowFunction;
-import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows;
 import org.apache.flink.streaming.api.windowing.assigners.SlidingProcessingTimeWindows;
 import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
@@ -52,8 +47,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Random;
-import java.util.function.Consumer;
-import java.util.stream.StreamSupport;
 
 
 /**
@@ -92,7 +85,7 @@ public class SdSigmaModel {
         SdSigmaModel job =
                 new SdSigmaModel(
                         new DataGeneratorSource<>(
-                                RandomCatastropheMetricGenerator.intCatastropheMetricGenerator(1, 10, 50000L)),
+                                RandomCatastropheMetricGenerator.intCatastropheMetricGenerator(1, 10, 30000L)),
                         new DataGeneratorSource<>(ProcessGenerator.bernoulliProcessGenerator(0.5)),
                         new PrintSinkFunction<>());
 
@@ -117,12 +110,21 @@ public class SdSigmaModel {
                 .forBoundedOutOfOrderness(Duration.ofSeconds(1))
                 .withTimestampAssigner((event, timestamp) -> Instant.now().getEpochSecond());
 
-        metricWithCatastrophe.assignTimestampsAndWatermarks(ws)
+        DataStream<Tuple4<Double, Double, Double, Double>> statsOfMetricWithCatastrophe =
+                metricWithCatastrophe.assignTimestampsAndWatermarks(ws)
                 .windowAll(SlidingProcessingTimeWindows.of(Time.seconds(10), Time.seconds(5)))
-                .process(new MeanCounter())
-                .process(new ToString(), TypeInformation.of(String.class)).addSink(new PrintSinkFunction<String>());
+                .process(new MeanAndSdCounter());
 
 
+
+        statsOfMetricWithCatastrophe
+                .process(new Tuple4ToString(), TypeInformation.of(String.class))
+                .addSink(new PrintSinkFunction<String>());
+
+        statsOfMetricWithCatastrophe
+                .process(new EventDecision(), TypeInformation.of(new TypeHint<Tuple1<String>>(){}))
+                .process(new Tuple1ToString(), TypeInformation.of(String.class))
+                .addSink(new PrintSinkFunction<String>());
 
         return env.execute("Taxi Ride Cleansing");
     }
@@ -130,13 +132,13 @@ public class SdSigmaModel {
     /**
      * Keep only those rides and both start and end in NYC.
      */
-    public class MeanCounter extends ProcessAllWindowFunction<Integer, Tuple2<Double, Double>, TimeWindow> {
+    public class MeanAndSdCounter extends ProcessAllWindowFunction<Integer, Tuple4<Double, Double, Double, Double>, TimeWindow> {
         private ValueStateDescriptor<Double> meanStoreDescriptor;
         private ValueStateDescriptor<Double> windowMeanStoreDescriptor;
 
         private ListStateDescriptor<Integer> fewWindowsStoreDescriptor;
 
-        public MeanCounter() {
+        public MeanAndSdCounter() {
             this.meanStoreDescriptor = meanStoreDescriptor =
                     new ValueStateDescriptor<Double>("mean-store", Double.class);
             this.windowMeanStoreDescriptor =
@@ -153,8 +155,8 @@ public class SdSigmaModel {
         }
 
         @Override
-        public void process(ProcessAllWindowFunction<Integer, Tuple2<Double, Double>, TimeWindow>.Context context,
-                            Iterable<Integer> elements, Collector<Tuple2<Double, Double>> out) throws Exception {
+        public void process(ProcessAllWindowFunction<Integer, Tuple4<Double, Double, Double, Double>, TimeWindow>.Context context,
+                            Iterable<Integer> elements, Collector<Tuple4<Double, Double, Double, Double>> out) throws Exception {
             ValueState<Double> meanStore = context.globalState().getState(meanStoreDescriptor);
             ValueState<Double> windowMeanStore = context.windowState().getState(windowMeanStoreDescriptor);
 
@@ -163,13 +165,12 @@ public class SdSigmaModel {
 
             Double mean = windowMeanStore.value();
 //            StreamSupport.stream(elements.spliterator(), false).count();
-            ArrayList<Integer> fewWinElements = Lists.newArrayList(fewWinElementsStore.get());
+            ArrayList<Integer> globalWindowElements = Lists.newArrayList(fewWinElementsStore.get());
 
             // TODO : Add to model params.
             Double samplingRation = 0.1;
             Integer elementsNo = Iterables.size(elements);
             Integer samplingElementsNo = Double.valueOf(Math.floor(samplingRation * elementsNo)).intValue();
-
 
             Random randomGen = new Random();
             ArrayList chosenElementsIds = new ArrayList();
@@ -177,7 +178,6 @@ public class SdSigmaModel {
                 chosenElementsIds.add(randomGen.nextInt(elementsNo));
             }
 
-            if (mean == null) mean = 0D;
             Integer elementsCounter = 0;
             ArrayList<Integer> chosenElements = new ArrayList<Integer>();
             for (Integer element : elements) {
@@ -185,41 +185,53 @@ public class SdSigmaModel {
                     chosenElements.add(element);
                 }
                 ++elementsCounter;
-                Double toMean = element.doubleValue();
-                mean = mean + toMean;
-
             };
 
             fewWinElementsStore.addAll(chosenElements);
-            windowMeanStore.update(mean/elementsNo);
 
             // TODO : BUG : Global should use global state, window chosen elements.
             StandardDeviation globalSd = new StandardDeviation();
-            double[] globalValues = new double[chosenElements.size()];
+            Mean globalMean = new Mean();
+            double[] globalValues = new double[globalWindowElements.size()];
             int i=0;
-            for(Integer value: chosenElements) {
+            for(Integer value: globalWindowElements) {
                 globalValues[i++] = value;
             }
-            Double globalSdValue = Double.valueOf(globalSd.evaluate(globalValues));
+            Double globalSdValue = globalSd.evaluate(globalValues);
             globalSdValue = Precision.round(globalSdValue.doubleValue(), 4);
+            Double globalMeanValue = globalMean.evaluate(globalValues);
+            globalMeanValue = Precision.round(globalMeanValue.doubleValue(), 4);
+
 
             StandardDeviation windowSd = new StandardDeviation();
-            double[] windowValues = new double[fewWinElements.size()];
+            Mean windowMean = new Mean();
+            double[] windowValues = new double[chosenElements.size()];
             int j=0;
-            for(Integer value: fewWinElements) {
+            for(Integer value: chosenElements) {
                 windowValues[j++] = value;
             }
-            Double windowSdValue = Double.valueOf(windowSd.evaluate(windowValues));
+            Double windowSdValue = windowSd.evaluate(windowValues);
             windowSdValue = Precision.round(windowSdValue.doubleValue(), 4);
+            Double windowMeanValue = globalMean.evaluate(windowValues);
+            windowMeanValue = Precision.round(windowMeanValue.doubleValue(), 4);
 
-            out.collect(new Tuple2<Double, Double>(globalSdValue, windowSdValue));
+            out.collect(new Tuple4<Double, Double, Double, Double>(
+                    globalMeanValue, globalSdValue,
+                    windowMeanValue, windowSdValue));
         }
     }
 
-    private class ToString extends org.apache.flink.streaming.api.functions.ProcessFunction {
+    private class Tuple4ToString extends org.apache.flink.streaming.api.functions.ProcessFunction {
         @Override
         public void processElement(Object value, Context ctx, Collector out) throws Exception {
-            out.collect("(global_sd, local_sd) : " + value.toString());
+            out.collect("(global_mean, global_sd, local_mean, local_sd) : " + value.toString());
+        }
+    }
+
+    private class Tuple1ToString extends org.apache.flink.streaming.api.functions.ProcessFunction {
+        @Override
+        public void processElement(Object value, Context ctx, Collector out) throws Exception {
+            out.collect("(ERROR) : " + value.toString());
         }
     }
 }
